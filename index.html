@@ -23,9 +23,18 @@
             backdrop-filter: blur(10px);
             border: 1px solid rgba(255, 255, 255, 0.1);
         }
+        /* Pulse animation for active recording */
+        @keyframes pulse-ring {
+            0% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(6, 182, 212, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0); }
+        }
+        .btn-active {
+            animation: pulse-ring 2s infinite;
+        }
     </style>
 </head>
-<body class="p-4 flex flex-col items-center min-h-screen">
+<body class="p-4 flex flex-col items-center min-h-screen pb-32">
 
     <!-- Header -->
     <header class="w-full max-w-md mb-6 text-center">
@@ -65,7 +74,7 @@
     </div>
 
     <!-- Controls / Virtual Coil Settings -->
-    <div class="w-full max-w-md readout-card rounded-xl p-4 mb-20">
+    <div class="w-full max-w-md readout-card rounded-xl p-4 mb-6">
         <h2 class="text-sm font-bold text-slate-300 mb-4 border-b border-slate-700 pb-2">Virtual Coil Settings</h2>
         
         <div class="mb-4">
@@ -87,6 +96,23 @@
         <p class="text-[10px] text-slate-500 mt-4 italic">
             *EMF is calculated based on these virtual dimensions. The phone measures the field; this math simulates what voltage a coil of this size would produce.
         </p>
+    </div>
+
+    <!-- Error/Help Panel (Hidden by default) -->
+    <div id="error-panel" class="hidden w-full max-w-md bg-red-900/20 border border-red-500/50 rounded-xl p-4 mb-20 text-sm text-slate-300">
+        <h3 class="font-bold text-red-400 flex items-center gap-2 mb-2">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
+            Sensor Access Blocked
+        </h3>
+        <p class="mb-2">The browser did not prompt for access. This is common on Android Chrome.</p>
+        <p class="font-bold text-slate-100 mb-1">How to fix:</p>
+        <ol class="list-decimal ml-4 space-y-1 text-xs">
+            <li>Type <code class="bg-slate-800 px-1 rounded">chrome://flags</code> in the URL bar.</li>
+            <li>Search for <b>"Generic Sensor"</b>.</li>
+            <li>Enable <b>"Generic Sensor Extra Classes"</b>.</li>
+            <li>Relaunch Chrome.</li>
+            <li>Alternatively, check <b>Settings > Site Settings > Motion Sensors</b> and ensure they are allowed.</li>
+        </ol>
     </div>
 
     <!-- Start Button / Status -->
@@ -178,6 +204,7 @@
         const elValB = document.getElementById('val-b-field');
         const elValEmf = document.getElementById('val-emf');
         const elStatus = document.getElementById('status-msg');
+        const errorPanel = document.getElementById('error-panel');
         
         // Settings Inputs
         const sliderTurns = document.getElementById('slider-turns');
@@ -215,45 +242,53 @@
             btnStart.textContent = "Start Sensor";
             btnStart.classList.replace('bg-red-600', 'bg-cyan-600');
             btnStart.classList.replace('hover:bg-red-500', 'hover:bg-cyan-500');
+            btnStart.classList.remove('btn-active');
             elStatus.textContent = "Sensor stopped.";
         }
 
         async function initSensor() {
-            // Check API Support
+            errorPanel.classList.add('hidden'); // Hide error panel initially
+
+            // 1. Check API Support
             if (!("Magnetometer" in window)) {
-                elStatus.innerHTML = "<span class='text-red-400'>Error: Magnetometer API not supported by this browser. Try Chrome on Android.</span>";
+                showError("Magnetometer API not supported. Use Chrome on Android and enable 'Generic Sensor Extra Classes' in flags.");
                 return;
             }
 
-            // Check Permissions
+            // 2. Permission Check (Try/Catch because some browsers throw on unknown names)
             try {
                 const result = await navigator.permissions.query({ name: "magnetometer" });
                 if (result.state === "denied") {
-                    elStatus.innerHTML = "<span class='text-red-400'>Permission denied. Enable sensors in browser settings.</span>";
+                    showError("Permission denied. Enable 'Motion Sensors' in Site Settings.");
                     return;
                 }
             } catch (error) {
-                console.log("Permission query skipped or failed", error);
+                // If the permission query fails, we proceed and try to open the sensor anyway,
+                // as the browser might prompt then.
+                console.log("Permission query API not fully supported, proceeding to open sensor...");
             }
 
             try {
-                // Initialize Sensor
-                // frequency: 60Hz matches typical screen refresh rates for smooth graphs
+                // 3. Initialize Sensor
                 magnetometer = new Magnetometer({ frequency: 60 });
                 
-                magnetometer.addEventListener("reading", () => {
-                    processReading(magnetometer.x, magnetometer.y, magnetometer.z, magnetometer.timestamp);
-                });
-
+                // 4. Attach Error Handler FIRST
                 magnetometer.addEventListener("error", (event) => {
                     if (event.error.name === "NotReadableError") {
-                        elStatus.textContent = "Sensor is not available.";
+                        showError("Sensor not readable. This usually means hardware access is blocked by the OS or a Chrome Flag.");
+                    } else if (event.error.name === "SecurityError") {
+                         showError("Security Error. Permissions blocked or not using HTTPS.");
                     } else {
-                        elStatus.textContent = `Error: ${event.error.name}`;
+                        showError(`Error: ${event.error.name} - ${event.error.message}`);
                     }
                     stopSensor();
                 });
 
+                magnetometer.addEventListener("reading", () => {
+                    processReading(magnetometer.x, magnetometer.y, magnetometer.z, magnetometer.timestamp);
+                });
+
+                // 5. Start
                 magnetometer.start();
                 isRunning = true;
                 
@@ -261,21 +296,32 @@
                 btnStart.textContent = "Stop Sensor";
                 btnStart.classList.replace('bg-cyan-600', 'bg-red-600');
                 btnStart.classList.replace('hover:bg-cyan-500', 'hover:bg-red-500');
+                btnStart.classList.add('btn-active');
                 elStatus.textContent = "Sensor active. Wave magnet to induce EMF.";
                 
                 // Initialize timing
                 lastTime = performance.now();
 
             } catch (error) {
-                elStatus.textContent = "Failed to start sensor: " + error.message;
+                if (error.name === "ReferenceError") {
+                    showError("Magnetometer feature not enabled. Enable 'Generic Sensor Extra Classes' in chrome://flags");
+                } else {
+                    showError("Failed to start: " + error.message);
+                }
             }
+        }
+
+        function showError(msg) {
+            elStatus.textContent = "Error detected.";
+            errorPanel.classList.remove('hidden');
+            // Add specific message to the panel text if needed, but the hardcoded text covers the 90% case
+            console.error(msg);
         }
 
         function processReading(x, y, z, timestamp) {
             if (!timestamp) timestamp = performance.now();
 
             // We use the Z-axis (perpendicular to screen) for the "Loop" simulation
-            // This is like laying the coil flat on the screen.
             let rawB = z; 
 
             // Initialize on first run
@@ -286,29 +332,25 @@
                 return;
             }
 
-            // 1. Low Pass Filter (Smooth the noise)
-            // Sensors are jittery; differentiation explodes noise. We must smooth first.
+            // 1. Low Pass Filter
             smoothedB = smoothedB + ALPHA * (rawB - smoothedB);
 
-            // 2. Calculate dt (Time delta in Seconds)
-            // Timestamp is typically ms
+            // 2. Calculate dt
             let dt = (timestamp - lastTime) / 1000;
             
-            // Avoid division by zero or massive jumps
+            // Avoid division by zero
             if (dt <= 0 || dt > 1.0) {
                 lastTime = timestamp;
                 return; 
             }
 
-            // 3. Calculate dB (Change in Field in Tesla)
-            // Sensor gives µT, convert to T for physics (multiply by 1e-6)
+            // 3. Calculate dB
             let deltaB_Tesla = (smoothedB - lastB) * 1e-6; 
 
-            // 4. Faraday's Law: EMF = -N * A * (dB/dt)
-            // Result is in Volts
+            // 4. Faraday's Law
             let emfVolts = -1 * coilTurns * coilAreaM2 * (deltaB_Tesla / dt);
             
-            // Convert to mV for display
+            // Convert to mV
             let emfMillivolts = emfVolts * 1000;
 
             // 5. Update UI
@@ -326,7 +368,6 @@
             const dataB = chart.data.datasets[0].data;
             const dataEmf = chart.data.datasets[1].data;
 
-            // Shift Array
             dataB.shift();
             dataB.push(bVal);
             
@@ -336,17 +377,15 @@
             chart.update();
         }
 
-        // Mock Data for Preview (Runs if no sensor found, for debugging/demo)
-        // This allows the user to see the UI even on desktop
+        // Mock Data Logic (Demo Mode)
+        // Only runs if Magnetometer is definitely NOT in window object
         if (!("Magnetometer" in window)) {
             setTimeout(() => {
-                if(!isRunning) elStatus.innerHTML = "<span class='text-yellow-500'>Demo Mode (No Sensor Detected)</span>";
+                if(!isRunning) elStatus.innerHTML = "<span class='text-yellow-500'>Demo Mode (Sensor API Missing)</span>";
                 setInterval(() => {
-                    if(isRunning) return; // Don't run mock if real sensor is on
+                    if(isRunning) return; 
                     let time = performance.now() / 1000;
-                    let fakeB = 50 * Math.sin(time * 5); // 50uT sine wave
-                    // Derivative of sin is cos
-                    // EMF prop to cos
+                    let fakeB = 50 * Math.sin(time * 5); 
                     let fakedt = 0.016;
                     let fakeDiff = (fakeB - (50 * Math.sin((time - fakedt) * 5))) * 1e-6;
                     let fakeEmf = -1 * coilTurns * coilAreaM2 * (fakeDiff / fakedt) * 1000;
